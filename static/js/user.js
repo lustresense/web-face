@@ -35,7 +35,6 @@
   const statusVerif=document.getElementById('status-verif');
   const btnLanjutForm=document.getElementById('btn-lanjut-form');
   const btnDetailData=document.getElementById('btn-detail-data');
-  const verifMethodTag=document.getElementById('verif-method');
 
   // Poli gateway
   const formPoliGateway=document.getElementById('form-poli-gateway');
@@ -87,7 +86,6 @@
     verifNikBox.classList.add('hidden');
     statusVerif.textContent='Menunggu...';
     verifData.innerHTML='';
-    if (verifMethodTag) verifMethodTag.classList.add('hidden');
   }
   function showAlert(msg){alertMessage.textContent=msg;modalAlert.classList.remove('hidden');}
   function hideAlert(){modalAlert.classList.add('hidden');}
@@ -160,10 +158,10 @@
     }
     await ensureCamera('reg');
     if(!streamReg)return;
-    statusReg.textContent='Mengambil frame...'; countReg.textContent='0';
-    showLoading('Registrasi: capture 20 frame...');
-    const frames=await captureFrames(videoReg,20,120,countReg,'Capture',0.85);
-    updateProgress(20,20,'Upload'); statusReg.textContent='Upload...';
+    statusReg.textContent='Mengambil foto...'; countReg.textContent='0';
+    showLoading('Registrasi: mengambil foto...');
+    const frames=await captureFrames(videoReg,20,120,countReg,'Foto',0.85);
+    updateProgress(20,20,'Mengirim'); statusReg.textContent='Mengirim...';
 
     const fd=new FormData();
     fd.append('nik',nikVal);
@@ -176,7 +174,7 @@
       const d=await r.json();
       hideLoading();
       if(!d.ok){showAlert(d.msg||'Registrasi gagal');statusReg.textContent='Gagal';return;}
-      statusReg.textContent='Sukses';
+      statusReg.textContent='Berhasil';
       activePatient={nik:nikVal,name:inputNama.value.trim(),address:inputAlamat.value.trim(),dob:inputDob.value};
       // Clear form UI
       formRegistrasi.reset(); countReg.textContent='0';
@@ -197,13 +195,13 @@
     } else showAlert('Data pasien tidak tersedia.');
   });
 
-  // Verifikasi (20 frame untuk lebih andal)
+  // Verifikasi
   btnScan.addEventListener('click',async ()=>{
     await ensureCamera('verif'); if(!streamVerif) return;
-    statusVerif.textContent='Mengambil frame...';
-    showLoading('Verifikasi: capture 20 frame...');
-    const frames=await captureFrames(videoVerif,20,100,null,'Verif',0.80);
-    updateProgress(20,20,'Upload');
+    statusVerif.textContent='Memverifikasi...';
+    showLoading('Verifikasi: mengambil foto...');
+    const frames=await captureFrames(videoVerif,20,100,null,'Verifikasi',0.80);
+    updateProgress(20,20,'Memproses');
     const fd=new FormData(); frames.forEach((b,i)=>fd.append('frames[]',b,`scan_${i}.jpg`));
     try{
       const r=await fetch('/api/recognize',{method:'POST',body:fd});
@@ -217,9 +215,8 @@
         <p><strong>Nama:</strong> ${d.name}</p>
         <p><strong>Umur:</strong> ${d.age}</p>
         <p><strong>Alamat:</strong> ${d.address}</p>
-        <p><strong>Confidence:</strong> ${d.confidence}%</p>
+        <p><strong>Tingkat Kecocokan:</strong> ${d.confidence}%</p>
       `;
-      if (verifMethodTag) { verifMethodTag.textContent=(d.method==='lbph'?'LBPH':'FALLBACK'); verifMethodTag.classList.remove('hidden'); }
       verifResult.classList.remove('hidden');
     }catch(err){
       hideLoading(); showAlert('Error jaringan: '+err.message); statusVerif.textContent='Error';
@@ -235,7 +232,7 @@
       <p><strong>Tanggal Lahir:</strong> ${activePatient.dob || '-'}</p>
       <p><strong>Umur:</strong> ${activePatient.age||computeAge(activePatient.dob)||'–'}</p>
       <p><strong>Alamat:</strong> ${activePatient.address}</p>
-      <p><strong>Confidence:</strong> ${activePatient.confidence ?? '-'}%</p>
+      <p><strong>Tingkat Kecocokan:</strong> ${activePatient.confidence ?? '-'}%</p>
     `;
     modalVerifDetail.classList.remove('hidden');
   });
@@ -266,7 +263,6 @@
         <p><strong>Umur:</strong> ${activePatient.age||computeAge(activePatient.dob)||'–'}</p>
         <p><strong>Alamat:</strong> ${activePatient.address}</p>
       `;
-      if (verifMethodTag) verifMethodTag.classList.add('hidden');
       verifResult.classList.remove('hidden');
       showAlert('Data pasien ditemukan.');
     }catch(err){hideLoading();showAlert('Error: '+err.message);}

@@ -71,12 +71,12 @@ recognizer = cv2.face.LBPHFaceRecognizer_create(1, 8, 8, 8)
 model_loaded = False
 model_lock = threading.Lock()
 
-# Threshold & voting (dari referensi + early stop agar cepat)
-LBPH_CONF_THRESHOLD = float(os.environ.get("LBPH_CONF_THRESHOLD", "75"))
-VOTE_MIN_SHARE = float(os.environ.get("VOTE_MIN_SHARE", "0.5"))
-MIN_VALID_FRAMES = int(os.environ.get("MIN_VALID_FRAMES", "2"))
+# Threshold & voting (disesuaikan agar lebih mudah recognize)
+LBPH_CONF_THRESHOLD = float(os.environ.get("LBPH_CONF_THRESHOLD", "100"))  # Naikkan threshold agar lebih toleran
+VOTE_MIN_SHARE = float(os.environ.get("VOTE_MIN_SHARE", "0.4"))  # Turunkan dari 0.5 ke 0.4 (40%)
+MIN_VALID_FRAMES = int(os.environ.get("MIN_VALID_FRAMES", "3"))  # Min 3 frame untuk lebih reliable
 EARLY_VOTES_REQUIRED = int(os.environ.get("EARLY_VOTES_REQUIRED", "5"))
-EARLY_CONF_THRESHOLD = float(os.environ.get("EARLY_CONF_THRESHOLD", "60"))
+EARLY_CONF_THRESHOLD = float(os.environ.get("EARLY_CONF_THRESHOLD", "70"))  # Naikkan dari 60 ke 70
 
 # ====== DB ======
 def db_connect():
@@ -206,8 +206,8 @@ def save_face_images_from_frame(img_bgr, name: str, nik: int, idx: int) -> int:
     if crop is None:
         return 0
 
-    # 2. Wajib tidak buram
-    if is_blurry(crop, thr=50.0):
+    # 2. Wajib tidak terlalu buram (threshold lebih rendah agar lebih banyak frame lolos)
+    if is_blurry(crop, thr=40.0):  # Turunkan dari 50 ke 40
         return 0
 
     # 3. Preprocess dengan cara yang sama seperti saat recognize (PENTING!)
@@ -519,8 +519,8 @@ def api_recognize():
 
             roi_raw, rect = detect_largest_face(gray)
             
-            # Validasi ketat: Wajib ada wajah & tidak buram
-            if roi_raw is None or is_blurry(roi_raw, 50.0):
+            # Validasi: Wajib ada wajah & tidak terlalu buram
+            if roi_raw is None or is_blurry(roi_raw, 30.0):  # Turunkan threshold blur dari 50 ke 30
                 continue
 
             roi = preprocess_roi(roi_raw)
