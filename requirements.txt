@@ -1,0 +1,4 @@
+Flask>=2.3
+opencv-contrib-python
+Pillow
+numpy
