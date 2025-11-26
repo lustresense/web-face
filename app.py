@@ -138,7 +138,8 @@ def calculate_age(dob_str: str) -> str:
         return "N/A"
 
 def list_existing_samples(nik: int) -> int:
-    return len(glob.glob(os.path.join(DATA_DIR, f"*.{nik}.*.jpg")))
+    # Format baru: nik.index.jpg (tanpa name di depan)
+    return len(glob.glob(os.path.join(DATA_DIR, f"{nik}.*.jpg")))
 
 def bytes_to_bgr(image_bytes: bytes):
     np_data = np.frombuffer(image_bytes, np.uint8)
@@ -188,10 +189,11 @@ def detect_largest_face(gray):
 
 def save_face_images_from_frame(img_bgr, name: str, nik: int, idx: int) -> int:
     """
-    Simpan 1 gambar dengan validasi ketat:
+    Simpan 1 gambar dengan validasi ketat dan preprocessing konsisten:
     - Wajah HARUS terdeteksi.
     - Wajah TIDAK BOLEH buram.
-    - Jika tidak valid, gambar dibuang.
+    - Gambar di-preprocess dengan cara yang sama seperti saat recognize.
+    - Format nama file: nik.index.jpg (tanpa name untuk konsistensi)
     """
     try:
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -205,35 +207,40 @@ def save_face_images_from_frame(img_bgr, name: str, nik: int, idx: int) -> int:
         return 0
 
     # 2. Wajib tidak buram
-    if is_blurry(crop, thr=50.0): # Threshold diperketat sedikit
+    if is_blurry(crop, thr=50.0):
         return 0
 
-    out_path = os.path.join(DATA_DIR, f"{name}.{nik}.{idx}.jpg")
-    cv2.imwrite(out_path, crop)
+    # 3. Preprocess dengan cara yang sama seperti saat recognize (PENTING!)
+    preprocessed = preprocess_roi(crop)
+
+    # 4. Format nama file baru: nik.index.jpg (tanpa name untuk menghindari inkonsistensi)
+    out_path = os.path.join(DATA_DIR, f"{nik}.{idx}.jpg")
+    cv2.imwrite(out_path, preprocessed)
     return 1
 
 def augment_img(img):
-    """Augment grayscale numpy img: flip/bright/rotate kecil."""
+    """Augment grayscale numpy img: flip/bright/rotate small angle."""
     out = img.copy()
-    out = cv2.equalizeHist(out)
-    out = cv2.convertScaleAbs(out, alpha=1.0, beta=10)
+    # Don't equalizeHist again since already preprocessed at save time
+    out = cv2.convertScaleAbs(out, alpha=1.05, beta=5)
     h, w = out.shape[:2]
-    M = cv2.getRotationMatrix2D((w//2, h//2), 5, 1.0)
+    M = cv2.getRotationMatrix2D((w//2, h//2), 3, 1.0)
     out = cv2.warpAffine(out, M, (w, h), borderMode=cv2.BORDER_REFLECT_101)
     return out
 
-def ensure_min_samples(name: str, nik: int, min_count: int = 20) -> int:
+def ensure_min_samples(nik: int, min_count: int = 20) -> int:
     """
     Pastikan minimal min_count file untuk NIK tersebut.
     Jika kurang, buat hasil augmentasi dari file yang ada.
+    Format nama file: nik.index.jpg
     """
-    pattern = os.path.join(DATA_DIR, f"{name}.{nik}.*.jpg")
-    files = sorted(glob.glob(pattern), key=lambda p: int(os.path.splitext(p)[0].split(".")[-1]))
+    pattern = os.path.join(DATA_DIR, f"{nik}.*.jpg")
+    files = sorted(glob.glob(pattern), key=lambda p: int(os.path.splitext(os.path.basename(p))[0].split(".")[1]))
     saved = len(files)
     if saved == 0:
         return 0
 
-    next_idx = int(os.path.splitext(files[-1])[0].split(".")[-1]) + 1
+    next_idx = int(os.path.splitext(os.path.basename(files[-1]))[0].split(".")[1]) + 1
     added = 0
     src_imgs = [cv2.imread(p, cv2.IMREAD_GRAYSCALE) for p in files if os.path.isfile(p)]
     src_imgs = [im for im in src_imgs if im is not None and im.size > 0]
@@ -244,7 +251,7 @@ def ensure_min_samples(name: str, nik: int, min_count: int = 20) -> int:
     while saved + added < min_count:
         base = src_imgs[i % len(src_imgs)]
         aug = augment_img(base)
-        out_path = os.path.join(DATA_DIR, f"{name}.{nik}.{next_idx}.jpg")
+        out_path = os.path.join(DATA_DIR, f"{nik}.{next_idx}.jpg")
         cv2.imwrite(out_path, aug)
         next_idx += 1
         added += 1
@@ -252,6 +259,11 @@ def ensure_min_samples(name: str, nik: int, min_count: int = 20) -> int:
     return added
 
 def get_images_and_labels():
+    """
+    Load semua gambar training dan NIK-nya.
+    Format nama file: nik.index.jpg
+    Gambar sudah ter-preprocess saat disimpan, jadi tidak perlu preprocess lagi.
+    """
     faces, ids = [], []
     for fname in os.listdir(DATA_DIR):
         if not fname.lower().endswith(".jpg"):
@@ -260,12 +272,17 @@ def get_images_and_labels():
         try:
             pil = Image.open(fpath).convert("L")
             img_np = np.array(pil, "uint8")
-            parts = fname.split(".")  # name.NIK.count.jpg
-            if len(parts) < 4:
+            parts = fname.split(".")  # Format baru: nik.index.jpg
+            if len(parts) < 3:  # Minimal: nik.index.jpg
+                print(f"Skip file dengan format salah: {fname}")
                 continue
-            img_np = preprocess_roi(img_np)
-            ids.append(int(parts[1]))
+            
+            # Ambil NIK dari parts[0] (format baru)
+            nik = int(parts[0])
+            
+            # Gambar sudah ter-preprocess saat save, tidak perlu preprocess lagi
             faces.append(img_np)
+            ids.append(nik)
         except Exception as e:
             print("Skip:", fpath, e)
     return faces, ids
@@ -455,14 +472,14 @@ def api_register():
         except Exception as e:
             print("Gagal proses frame:", e)
 
-    # # Pastikan minimal 20 file — augment/pad bila perlu (dinonaktifkan untuk kualitas)
-    # added = 0
-    # try:
-    #     if saved_total < 20:
-    #         added = ensure_min_samples(name, nik, 20)
-    #         saved_total += added
-    # except Exception as e:
-    #     print("Pad samples error:", e)
+    # Pastikan minimal 20 file — augment/pad bila perlu
+    added = 0
+    try:
+        if saved_total < 20:
+            added = ensure_min_samples(nik, 20)
+            saved_total += added
+    except Exception as e:
+        print("Pad samples error:", e)
 
     if saved_total == 0:
         # Jika tidak ada frame yang lolos validasi, hapus data pasien agar tidak ada "zombie record"
@@ -607,7 +624,8 @@ def admin_delete_patient(nik: int):
         conn.execute("DELETE FROM patients WHERE nik = ?", (nik,))
         conn.commit()
     removed = 0
-    for path in glob.glob(os.path.join(DATA_DIR, f"*.{nik}.*.jpg")):
+    # Format nama file baru: nik.index.jpg
+    for path in glob.glob(os.path.join(DATA_DIR, f"{nik}.*.jpg")):
         try:
             os.remove(path)
             removed += 1
@@ -623,11 +641,11 @@ def admin_update_patient():
     try:
         old_nik_str = request.form.get("old_nik", "").strip()
         nik_str = request.form.get("nik", "").strip()
-        name = request.form.get("name", "").strip()
+        # Nama TIDAK BISA diedit (sesuai request user)
         dob = request.form.get("dob", "").strip()
         address = request.form.get("address", "").strip()
 
-        if not all([old_nik_str, nik_str, name, dob, address]):
+        if not all([old_nik_str, nik_str, dob, address]):
             return jsonify(ok=False, msg="Semua field wajib diisi."), 400
 
         old_nik = int(old_nik_str)
@@ -638,32 +656,37 @@ def admin_update_patient():
             if nik != old_nik and conn.execute("SELECT 1 FROM patients WHERE nik = ?", (nik,)).fetchone():
                 return jsonify(ok=False, msg=f"NIK {nik} sudah terdaftar untuk pasien lain."), 409
 
+            # Update only NIK, DOB, and Address (NAME is NOT changed)
             conn.execute("""
-                UPDATE patients SET nik=?, name=?, dob=?, address=? WHERE nik=?
-            """, (nik, name, dob, address, old_nik))
+                UPDATE patients SET nik=?, dob=?, address=? WHERE nik=?
+            """, (nik, dob, address, old_nik))
             conn.commit()
 
-        # Jika NIK berubah, rename semua file gambar terkait
+        # If NIK changed, rename all image files AND RETRAIN model
         if nik != old_nik:
             renamed_count = 0
-            pattern = os.path.join(DATA_DIR, f"*.{old_nik}.*.jpg")
+            pattern = os.path.join(DATA_DIR, f"{old_nik}.*.jpg")
             for old_path in glob.glob(pattern):
                 fname = os.path.basename(old_path)
                 parts = fname.split('.')
                 if len(parts) >= 3:
-                    # Format: name.old_nik.index.jpg -> name.new_nik.index.jpg
-                    new_fname = f"{parts[0]}.{nik}.{'.'.join(parts[2:])}"
+                    # Format baru: old_nik.index.jpg -> new_nik.index.jpg
+                    new_fname = f"{nik}.{'.'.join(parts[1:])}"
                     new_path = os.path.join(DATA_DIR, new_fname)
                     try:
                         os.rename(old_path, new_path)
                         renamed_count += 1
                     except Exception as e:
                         print(f"Gagal rename {old_path} ke {new_path}: {e}")
-            msg_rename = f"{renamed_count} file gambar diupdate."
+            
+            # RETRAIN model karena NIK (label) berubah
+            ok_retrain, msg_retrain = retrain_after_change()
+            msg_rename = f"{renamed_count} file gambar di-rename. {msg_retrain}"
+            if not ok_retrain:
+                return jsonify(ok=False, msg=f"Data diupdate tapi retrain gagal: {msg_retrain}"), 500
         else:
-            msg_rename = "NIK tidak berubah."
+            msg_rename = "NIK tidak berubah, tidak perlu retrain."
 
-        # Tidak perlu retrain karena isi wajah tidak berubah, hanya metadata
         return jsonify(ok=True, msg=f"Data pasien NIK {old_nik} berhasil diupdate. {msg_rename}")
 
     except ValueError:
