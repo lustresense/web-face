@@ -149,7 +149,7 @@
     const fd=new FormData();
     fd.append('old_nik', editOldNik.value.trim());
     fd.append('nik', editNik.value.trim());
-    fd.append('name', editNama.value.trim());
+    // Nama TIDAK dikirim karena tidak bisa diubah
     fd.append('dob', editDob.value.trim());
     fd.append('address', editAlamat.value.trim());
     try{
