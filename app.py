@@ -72,11 +72,11 @@ model_loaded = False
 model_lock = threading.Lock()
 
 # Threshold & voting (disesuaikan agar lebih mudah recognize)
-LBPH_CONF_THRESHOLD = float(os.environ.get("LBPH_CONF_THRESHOLD", "100"))  # Naikkan threshold agar lebih toleran
-VOTE_MIN_SHARE = float(os.environ.get("VOTE_MIN_SHARE", "0.4"))  # Turunkan dari 0.5 ke 0.4 (40%)
-MIN_VALID_FRAMES = int(os.environ.get("MIN_VALID_FRAMES", "3"))  # Min 3 frame untuk lebih reliable
-EARLY_VOTES_REQUIRED = int(os.environ.get("EARLY_VOTES_REQUIRED", "5"))
-EARLY_CONF_THRESHOLD = float(os.environ.get("EARLY_CONF_THRESHOLD", "70"))  # Naikkan dari 60 ke 70
+LBPH_CONF_THRESHOLD = float(os.environ.get("LBPH_CONF_THRESHOLD", "120"))  # Naikkan threshold agar lebih toleran (100->120)
+VOTE_MIN_SHARE = float(os.environ.get("VOTE_MIN_SHARE", "0.35"))  # Turunkan dari 0.4 ke 0.35 (35%)
+MIN_VALID_FRAMES = int(os.environ.get("MIN_VALID_FRAMES", "2"))  # Min 2 frame untuk lebih flexible
+EARLY_VOTES_REQUIRED = int(os.environ.get("EARLY_VOTES_REQUIRED", "4"))  # Turunkan dari 5 ke 4
+EARLY_CONF_THRESHOLD = float(os.environ.get("EARLY_CONF_THRESHOLD", "80"))  # Naikkan dari 70 ke 80
 
 # ====== DB ======
 def db_connect():
@@ -265,6 +265,7 @@ def get_images_and_labels():
     Gambar sudah ter-preprocess saat disimpan, jadi tidak perlu preprocess lagi.
     """
     faces, ids = [], []
+    nik_counts = {}
     for fname in os.listdir(DATA_DIR):
         if not fname.lower().endswith(".jpg"):
             continue
@@ -283,19 +284,29 @@ def get_images_and_labels():
             # Gambar sudah ter-preprocess saat save, tidak perlu preprocess lagi
             faces.append(img_np)
             ids.append(nik)
+            nik_counts[nik] = nik_counts.get(nik, 0) + 1
         except Exception as e:
             print("Skip:", fpath, e)
+    
+    if faces:
+        print(f"[TRAINING] Loaded {len(faces)} images for {len(nik_counts)} unique NIKs from {DATA_DIR}")
+        for nik, count in sorted(nik_counts.items()):
+            print(f"  - NIK {nik}: {count} images")
     return faces, ids
 
 def train_model_blocking():
     faces, ids = get_images_and_labels()
     if not faces:
+        print("[TRAINING] No training data found!")
         return False, "Tidak ada data untuk training!"
     try:
+        print(f"[TRAINING] Starting training with {len(faces)} images...")
         recognizer.train(faces, np.array(ids))
         recognizer.save(MODEL_PATH)
+        print(f"[TRAINING] Model saved to {MODEL_PATH}")
         return True, "Training selesai."
     except Exception as e:
+        print(f"[TRAINING] Error: {e}")
         return False, f"Error training: {e}"
 
 def load_model_if_exists():
@@ -304,11 +315,13 @@ def load_model_if_exists():
         try:
             recognizer.read(MODEL_PATH)
             model_loaded = True
+            print(f"[MODEL] Successfully loaded model from {MODEL_PATH}")
             return True
         except Exception as e:
-            print("Gagal load model:", e)
+            print(f"[MODEL] Failed to load model: {e}")
             model_loaded = False
             return False
+    print(f"[MODEL] No model file found at {MODEL_PATH}")
     return False
 
 def retrain_after_change():
@@ -486,9 +499,12 @@ def api_register():
         with db_connect() as conn:
             conn.execute("DELETE FROM patients WHERE nik = ?", (nik,))
             conn.commit()
+        print(f"[REGISTER] Failed for NIK {nik}: No valid frames from {len(files)} uploaded files")
         return jsonify(ok=False, msg=f"Registrasi gagal: Tidak ada frame yang lolos validasi kualitas. Pastikan wajah terlihat jelas, tidak buram, dan cahaya cukup."), 400
 
+    print(f"[REGISTER] Success for NIK {nik}: {saved_total} frames saved from {len(files)} files")
     ok, msg = retrain_after_change()
+    print(f"[REGISTER] Retrain result: ok={ok}, msg={msg}")
     return jsonify(ok=True, msg=f"Registrasi OK. {saved_total} frame berkualitas berhasil disimpan. {msg}")
 
 # ====== API: RECOGNIZE (HANYA LOGIKA SCAN/VERIF yang diubah) ======
@@ -520,7 +536,7 @@ def api_recognize():
             roi_raw, rect = detect_largest_face(gray)
             
             # Validasi: Wajib ada wajah & tidak terlalu buram
-            if roi_raw is None or is_blurry(roi_raw, 30.0):  # Turunkan threshold blur dari 50 ke 30
+            if roi_raw is None or is_blurry(roi_raw, 25.0):  # Turunkan threshold blur dari 30 ke 25 untuk lebih toleran
                 continue
 
             roi = preprocess_roi(roi_raw)
@@ -543,18 +559,23 @@ def api_recognize():
             print("Error predict:", e)
 
     if processed == 0 or not votes:
+        print(f"[RECOGNIZE] No faces detected. Processed: {processed}, Votes: {len(votes)}")
         return jsonify(ok=True, found=False, msg="Tidak ada wajah terdeteksi.")
 
     all_preds = [(nk, c) for nk, lst in votes.items() for c in lst]
     major = Counter([nk for nk, _ in all_preds]).most_common(1)[0][0]
     confs_for_major = votes.get(major, [])
     if not confs_for_major:
+        print(f"[RECOGNIZE] No confidences for major NIK: {major}")
         return jsonify(ok=True, found=False, msg="Tidak dikenali.")
 
     vote_share = len(confs_for_major) / processed
     median_conf = float(np.median(confs_for_major))
+    
+    print(f"[RECOGNIZE] NIK: {major}, Votes: {len(confs_for_major)}/{processed} ({vote_share:.2%}), Median Conf: {median_conf:.2f}")
 
     if vote_share < VOTE_MIN_SHARE or len(confs_for_major) < MIN_VALID_FRAMES or median_conf >= LBPH_CONF_THRESHOLD:
+        print(f"[RECOGNIZE] Rejected - vote_share: {vote_share:.2%} (min: {VOTE_MIN_SHARE:.2%}), valid_frames: {len(confs_for_major)} (min: {MIN_VALID_FRAMES}), conf: {median_conf:.2f} (max: {LBPH_CONF_THRESHOLD})")
         return jsonify(ok=True, found=False, msg="Tidak dikenali.")
 
     with db_connect() as conn:
