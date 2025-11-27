@@ -44,6 +44,10 @@ RECOGNITION_THRESHOLD = float(os.environ.get("RECOGNITION_THRESHOLD", "0.4"))  #
 MIN_FACE_SIZE = int(os.environ.get("MIN_FACE_SIZE", "60"))  # Minimum face size in pixels
 EMBEDDING_DIM = 512  # ArcFace embedding dimension
 
+# Registration thresholds (relaxed for easier enrollment)
+REGISTRATION_DETECTION_THRESHOLD = float(os.environ.get("REGISTRATION_DETECTION_THRESHOLD", "0.3"))  # Lower threshold for registration
+REGISTRATION_QUALITY_THRESHOLD = float(os.environ.get("REGISTRATION_QUALITY_THRESHOLD", "0.1"))  # Lower quality threshold for registration
+
 # Voting parameters for multi-frame recognition
 VOTE_MIN_SHARE = float(os.environ.get("VOTE_MIN_SHARE", "0.35"))  # Minimum vote share
 MIN_VALID_FRAMES = int(os.environ.get("MIN_VALID_FRAMES", "2"))  # Minimum valid frames
@@ -263,11 +267,18 @@ def get_unique_nik_count() -> int:
 
 # ====== FACE DETECTION ======
 
-def detect_faces(img_bgr: np.ndarray) -> List[Dict[str, Any]]:
+def detect_faces(img_bgr: np.ndarray, detection_threshold: Optional[float] = None) -> List[Dict[str, Any]]:
     """
     Detect faces in image using InsightFace RetinaFace.
     Returns list of face dictionaries with bbox, landmarks, det_score, embedding.
+    
+    Args:
+        img_bgr: BGR image array
+        detection_threshold: Optional custom detection threshold (defaults to DETECTION_THRESHOLD)
     """
+    if detection_threshold is None:
+        detection_threshold = DETECTION_THRESHOLD
+    
     app = _get_face_app()
     if app is None:
         return _detect_faces_fallback(img_bgr)
@@ -276,7 +287,7 @@ def detect_faces(img_bgr: np.ndarray) -> List[Dict[str, Any]]:
         faces = app.get(img_bgr)
         results = []
         for face in faces:
-            if face.det_score < DETECTION_THRESHOLD:
+            if face.det_score < detection_threshold:
                 continue
             
             bbox = face.bbox.astype(int).tolist()
@@ -330,9 +341,15 @@ def _detect_faces_fallback(img_bgr: np.ndarray) -> List[Dict[str, Any]]:
         return []
 
 
-def detect_largest_face(img_bgr: np.ndarray) -> Optional[Dict[str, Any]]:
-    """Detect and return the largest face in the image"""
-    faces = detect_faces(img_bgr)
+def detect_largest_face(img_bgr: np.ndarray, detection_threshold: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """
+    Detect and return the largest face in the image.
+    
+    Args:
+        img_bgr: BGR image array
+        detection_threshold: Optional custom detection threshold (defaults to DETECTION_THRESHOLD)
+    """
+    faces = detect_faces(img_bgr, detection_threshold=detection_threshold)
     if not faces:
         return None
     return faces[0]  # Already sorted by size
@@ -610,14 +627,17 @@ def enroll_face(
     """
     Enroll a single face image to database.
     Returns (success, message, embedding).
+    
+    Uses relaxed detection and quality thresholds for easier registration.
     """
-    face = detect_largest_face(img_bgr)
+    # Use relaxed detection threshold for registration
+    face = detect_largest_face(img_bgr, detection_threshold=REGISTRATION_DETECTION_THRESHOLD)
     if face is None:
         return False, "No face detected", None
     
-    # Check quality
+    # Check quality with relaxed threshold for registration
     quality = calculate_quality_score(face, img_bgr)
-    if quality < 0.3:
+    if quality < REGISTRATION_QUALITY_THRESHOLD:
         return False, f"Face quality too low: {quality:.2f}", None
     
     embedding = face.get('embedding')
