@@ -1,7 +1,14 @@
+"""
+Face Detection and Recognition Web Application
+Menggunakan InsightFace (RetinaFace + ArcFace) untuk akurasi tinggi.
+Fallback ke LBPH jika InsightFace tidak tersedia.
+"""
+
 import os
 import glob
 import sqlite3
 import threading
+import logging
 from datetime import datetime
 
 import cv2
@@ -13,9 +20,13 @@ from flask import (
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # ====== PATH CONFIG ======
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data", "database_wajah")  # <-- pakai folder dataset yang kamu minta
+DATA_DIR = os.path.join(BASE_DIR, "data", "database_wajah")
 MODEL_DIR = os.path.join(BASE_DIR, "model")
 DB_PATH = os.path.join(BASE_DIR, "database.db")
 MODEL_PATH = os.path.join(MODEL_DIR, "Trainer.yml")
@@ -26,6 +37,27 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 # ====== FLASK APP ======
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key")
+
+# ====== FACE ENGINE SELECTION ======
+# Try to use InsightFace first, fallback to LBPH
+USE_INSIGHTFACE = os.environ.get("USE_INSIGHTFACE", "1") == "1"
+FACE_ENGINE = None
+
+try:
+    if USE_INSIGHTFACE:
+        import face_engine
+        face_engine.initialize()
+        FACE_ENGINE = "insightface"
+        logger.info("Using InsightFace engine for face recognition")
+except ImportError as e:
+    logger.warning(f"InsightFace not available, falling back to LBPH: {e}")
+    FACE_ENGINE = "lbph"
+except Exception as e:
+    logger.warning(f"Failed to initialize InsightFace, falling back to LBPH: {e}")
+    FACE_ENGINE = "lbph"
+
+if FACE_ENGINE is None:
+    FACE_ENGINE = "lbph"
 
 # ====== ADMIN CREDENTIALS ======
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
@@ -40,7 +72,7 @@ def login_required(view_func):
     wrapper.__name__ = view_func.__name__
     return wrapper
 
-# ====== OpenCV SETUP ======
+# ====== OpenCV SETUP (for LBPH fallback) ======
 def get_cascade_path(fname="haarcascade_frontalface_default.xml"):
     try:
         return os.path.join(cv2.data.haarcascades, fname)
@@ -50,33 +82,32 @@ def get_cascade_path(fname="haarcascade_frontalface_default.xml"):
 CASCADE_FILE_MAIN = get_cascade_path("haarcascade_frontalface_default.xml")
 CASCADE_FILE_ALT2 = get_cascade_path("haarcascade_frontalface_alt2.xml")
 
-for _f in (CASCADE_FILE_MAIN,):
-    if not os.path.isfile(_f):
-        raise RuntimeError(f"Cascade tidak ditemukan: {_f}")
-
+# Only check cascade if we might need LBPH fallback
 detectors = []
-det_main = cv2.CascadeClassifier(CASCADE_FILE_MAIN)
-if not det_main.empty():
-    detectors.append(det_main)
-det_alt2 = cv2.CascadeClassifier(CASCADE_FILE_ALT2) if os.path.isfile(CASCADE_FILE_ALT2) else None
-if det_alt2 is not None and not det_alt2.empty():
-    detectors.append(det_alt2)
+if os.path.isfile(CASCADE_FILE_MAIN):
+    det_main = cv2.CascadeClassifier(CASCADE_FILE_MAIN)
+    if not det_main.empty():
+        detectors.append(det_main)
 
-if not hasattr(cv2, "face"):
-    raise RuntimeError("cv2.face tidak tersedia. Install di venv aktif:\npython -m pip install opencv-contrib-python")
+if os.path.isfile(CASCADE_FILE_ALT2):
+    det_alt2 = cv2.CascadeClassifier(CASCADE_FILE_ALT2)
+    if not det_alt2.empty():
+        detectors.append(det_alt2)
 
-# LBPH param (mengacu referensi kamu)
-recognizer = cv2.face.LBPHFaceRecognizer_create(1, 8, 8, 8)
+# LBPH recognizer (for fallback)
+recognizer = None
+if hasattr(cv2, "face"):
+    recognizer = cv2.face.LBPHFaceRecognizer_create(1, 8, 8, 8)
 
 model_loaded = False
 model_lock = threading.Lock()
 
-# Threshold & voting (disesuaikan agar lebih mudah recognize)
-LBPH_CONF_THRESHOLD = float(os.environ.get("LBPH_CONF_THRESHOLD", "120"))  # Naikkan threshold agar lebih toleran (100->120)
-VOTE_MIN_SHARE = float(os.environ.get("VOTE_MIN_SHARE", "0.35"))  # Turunkan dari 0.4 ke 0.35 (35%)
-MIN_VALID_FRAMES = int(os.environ.get("MIN_VALID_FRAMES", "2"))  # Min 2 frame untuk lebih flexible
-EARLY_VOTES_REQUIRED = int(os.environ.get("EARLY_VOTES_REQUIRED", "4"))  # Turunkan dari 5 ke 4
-EARLY_CONF_THRESHOLD = float(os.environ.get("EARLY_CONF_THRESHOLD", "80"))  # Naikkan dari 70 ke 80
+# Threshold & voting
+LBPH_CONF_THRESHOLD = float(os.environ.get("LBPH_CONF_THRESHOLD", "120"))
+VOTE_MIN_SHARE = float(os.environ.get("VOTE_MIN_SHARE", "0.35"))
+MIN_VALID_FRAMES = int(os.environ.get("MIN_VALID_FRAMES", "2"))
+EARLY_VOTES_REQUIRED = int(os.environ.get("EARLY_VOTES_REQUIRED", "4"))
+EARLY_CONF_THRESHOLD = float(os.environ.get("EARLY_CONF_THRESHOLD", "80"))
 
 # ====== DB ======
 def db_connect():
@@ -392,17 +423,52 @@ def admin_dashboard():
     with db_connect() as conn:
         rows = conn.execute("SELECT nik, name, dob, address, created_at FROM patients ORDER BY created_at DESC").fetchall()
         queues = conn.execute("SELECT poli_name, next_number FROM queues").fetchall()
+    
+    # Get data counts
     data_count = len([f for f in os.listdir(DATA_DIR) if f.lower().endswith(".jpg")])
+    
+    # Get engine status
+    engine_info = {
+        'name': FACE_ENGINE.upper(),
+        'model_loaded': model_loaded
+    }
+    
+    if FACE_ENGINE == "insightface":
+        try:
+            status = face_engine.get_engine_status()
+            engine_info['embeddings_count'] = status.get('total_embeddings', 0)
+            engine_info['model_loaded'] = status.get('insightface_available', False)
+        except Exception:
+            pass
+    
     return render_template(
         "admin_dashboard.html",
         patients=rows,
-        model_loaded=model_loaded,
-        model_name="LBPH",
+        model_loaded=engine_info['model_loaded'],
+        model_name=engine_info['name'],
         foto_count=data_count,
         total_patients=len(rows),
         queues=queues,
-        admin_name=session.get("admin_name", "Admin")
+        admin_name=session.get("admin_name", "Admin"),
+        face_engine=FACE_ENGINE
     )
+
+# ====== API: ENGINE STATUS ======
+@app.get("/api/engine/status")
+def api_engine_status():
+    """Get face recognition engine status"""
+    status = {
+        'engine': FACE_ENGINE,
+        'model_loaded': model_loaded
+    }
+    
+    if FACE_ENGINE == "insightface":
+        try:
+            status.update(face_engine.get_engine_status())
+        except Exception as e:
+            status['error'] = str(e)
+    
+    return jsonify(ok=True, status=status)
 
 # ====== API: PATIENTS (READ) untuk tabel admin ======
 @app.get("/api/patients")
@@ -443,15 +509,18 @@ def api_patient_detail(nik: int):
         "age": calculate_age(r["dob"])
     })
 
-# ====== API: REGISTER (HANYA LOGIKA SCAN/SIMPAN yang diubah) ======
+# ====== API: REGISTER ======
 @app.post("/api/register")
 def api_register():
+    """
+    Register a new patient with face data.
+    Uses InsightFace for high-accuracy face embedding when available.
+    """
     nik_str = request.form.get("nik", "").strip()
     name = (request.form.get("nama") or request.form.get("name") or "").strip()
-    dob = (request.form.get("ttl") or request.form.get("dob") or "").strip()  # bebas format
+    dob = (request.form.get("ttl") or request.form.get("dob") or "").strip()
     address = (request.form.get("alamat") or request.form.get("address") or "").strip()
 
-    # Terima frames[] atau files[] (dua-duanya didukung)
     files = request.files.getlist("files[]")
     if not files:
         files = request.files.getlist("frames[]")
@@ -474,50 +543,80 @@ def api_register():
         """, (nik, name, dob, address, now_iso))
         conn.commit()
 
-    existing = list_existing_samples(nik)
-    next_idx = existing + 1
-    saved_total = 0
+    # Convert uploaded files to BGR images
+    frames = []
     for f in files:
         try:
             img = bytes_to_bgr(f.read())
-            if img is None:
-                continue
+            if img is not None:
+                frames.append(img)
+        except Exception as e:
+            logger.warning(f"Failed to process frame: {e}")
+
+    if not frames:
+        with db_connect() as conn:
+            conn.execute("DELETE FROM patients WHERE nik = ?", (nik,))
+            conn.commit()
+        return jsonify(ok=False, msg="Tidak ada frame yang valid."), 400
+
+    # Use InsightFace engine if available
+    if FACE_ENGINE == "insightface":
+        try:
+            enrolled, msg = face_engine.enroll_multiple_frames(frames, nik, min_embeddings=5)
+            if enrolled == 0:
+                with db_connect() as conn:
+                    conn.execute("DELETE FROM patients WHERE nik = ?", (nik,))
+                    conn.commit()
+                logger.warning(f"[REGISTER] InsightFace failed for NIK {nik}: {msg}")
+                return jsonify(ok=False, msg=f"Registrasi gagal: {msg}"), 400
+            
+            logger.info(f"[REGISTER] InsightFace success for NIK {nik}: {enrolled} embeddings")
+            return jsonify(ok=True, msg=f"Registrasi OK (InsightFace). {enrolled} embedding berhasil disimpan.")
+        except Exception as e:
+            logger.error(f"[REGISTER] InsightFace error: {e}")
+            # Fall through to LBPH fallback
+
+    # LBPH fallback
+    existing = list_existing_samples(nik)
+    next_idx = existing + 1
+    saved_total = 0
+    
+    for img in frames:
+        try:
             saved = save_face_images_from_frame(img, name, nik, next_idx + saved_total)
             saved_total += saved
             if saved_total >= 20:
                 break
         except Exception as e:
-            print("Gagal proses frame:", e)
+            logger.warning(f"Failed to save frame: {e}")
 
-    # Pastikan minimal 20 file — augment/pad bila perlu
-    added = 0
-    try:
-        if saved_total < 20:
+    # Ensure minimum samples with augmentation
+    if saved_total > 0 and saved_total < 20:
+        try:
             added = ensure_min_samples(nik, 20)
             saved_total += added
-    except Exception as e:
-        print("Pad samples error:", e)
+        except Exception as e:
+            logger.warning(f"Pad samples error: {e}")
 
     if saved_total == 0:
-        # Jika tidak ada frame yang lolos validasi, hapus data pasien agar tidak ada "zombie record"
         with db_connect() as conn:
             conn.execute("DELETE FROM patients WHERE nik = ?", (nik,))
             conn.commit()
-        print(f"[REGISTER] Failed for NIK {nik}: No valid frames from {len(files)} uploaded files")
-        return jsonify(ok=False, msg=f"Registrasi gagal: Tidak ada frame yang lolos validasi kualitas. Pastikan wajah terlihat jelas, tidak buram, dan cahaya cukup."), 400
+        logger.warning(f"[REGISTER] LBPH failed for NIK {nik}: No valid frames")
+        return jsonify(ok=False, msg="Registrasi gagal: Tidak ada frame yang lolos validasi."), 400
 
-    print(f"[REGISTER] Success for NIK {nik}: {saved_total} frames saved from {len(files)} files")
+    logger.info(f"[REGISTER] LBPH success for NIK {nik}: {saved_total} frames")
     ok, msg = retrain_after_change()
-    print(f"[REGISTER] Retrain result: ok={ok}, msg={msg}")
-    return jsonify(ok=True, msg=f"Registrasi OK. {saved_total} frame berkualitas berhasil disimpan. {msg}")
+    return jsonify(ok=True, msg=f"Registrasi OK (LBPH). {saved_total} frame disimpan. {msg}")
 
-# ====== API: RECOGNIZE (HANYA LOGIKA SCAN/VERIF yang diubah) ======
+
+# ====== API: RECOGNIZE ======
 @app.post("/api/recognize")
 def api_recognize():
-    if not model_loaded or not os.path.isfile(MODEL_PATH):
-        return jsonify(ok=False, msg="Model belum tersedia. Silakan register dulu."), 400
-
-    # Terima frames[] atau files[] (dua-duanya didukung)
+    """
+    Recognize a face from uploaded frames.
+    Uses InsightFace for high-accuracy recognition when available.
+    """
     files = request.files.getlist("files[]")
     if not files:
         files = request.files.getlist("frames[]")
@@ -525,22 +624,70 @@ def api_recognize():
     if not files:
         return jsonify(ok=False, msg="Tidak ada gambar yang dikirim."), 400
 
-    from collections import defaultdict, Counter
-    votes = defaultdict(list)  # nik -> list(conf)
-    processed = 0
-    best_nik, best_avg = None, 99999.0
-
+    # Convert uploaded files to BGR images
+    frames = []
     for f in files:
         try:
             img = bytes_to_bgr(f.read())
-            if img is None:
-                continue
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            if img is not None:
+                frames.append(img)
+        except Exception:
+            pass
 
+    if not frames:
+        return jsonify(ok=True, found=False, msg="Tidak ada frame yang valid.")
+
+    # Use InsightFace engine if available
+    if FACE_ENGINE == "insightface":
+        try:
+            result = face_engine.recognize_face_multi_frame(frames)
+            if result is None:
+                logger.info("[RECOGNIZE] InsightFace: No match found")
+                return jsonify(ok=True, found=False, msg="Tidak dikenali.")
+            
+            nik = result['nik']
+            with db_connect() as conn:
+                row = conn.execute(
+                    "SELECT nik, name, dob, address FROM patients WHERE nik = ?",
+                    (nik,)
+                ).fetchone()
+            
+            if not row:
+                return jsonify(ok=True, found=False, msg="NIK tidak ditemukan di database.")
+            
+            age = calculate_age(row["dob"])
+            confidence = result.get('confidence', int(result['similarity'] * 100))
+            
+            logger.info(f"[RECOGNIZE] InsightFace success: NIK={nik}, sim={result['similarity']:.3f}")
+            return jsonify(
+                ok=True, found=True,
+                nik=row["nik"], name=row["name"], dob=row["dob"], address=row["address"],
+                age=age, confidence=confidence,
+                engine="insightface",
+                similarity=result['similarity']
+            )
+        except Exception as e:
+            logger.error(f"[RECOGNIZE] InsightFace error: {e}")
+            # Fall through to LBPH fallback
+
+    # LBPH fallback
+    if not model_loaded or not os.path.isfile(MODEL_PATH):
+        return jsonify(ok=False, msg="Model belum tersedia. Silakan register dulu."), 400
+
+    if recognizer is None:
+        return jsonify(ok=False, msg="LBPH recognizer tidak tersedia."), 500
+
+    from collections import defaultdict, Counter
+    votes = defaultdict(list)
+    processed = 0
+    best_nik, best_avg = None, 99999.0
+
+    for img in frames:
+        try:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             roi_raw, rect = detect_largest_face(gray)
             
-            # Validasi: Wajib ada wajah & tidak terlalu buram
-            if roi_raw is None or is_blurry(roi_raw, 25.0):  # Turunkan threshold blur dari 30 ke 25 untuk lebih toleran
+            if roi_raw is None or is_blurry(roi_raw, 25.0):
                 continue
 
             roi = preprocess_roi(roi_raw)
@@ -548,7 +695,7 @@ def api_recognize():
             votes[int(Id_pred)].append(float(conf))
             processed += 1
 
-            # early-stop bila sudah cukup yakin
+            # Early stop check
             for nk, cfs in votes.items():
                 avg = sum(cfs) / len(cfs)
                 if avg < best_avg:
@@ -560,26 +707,22 @@ def api_recognize():
                     break
 
         except Exception as e:
-            print("Error predict:", e)
+            logger.warning(f"LBPH predict error: {e}")
 
     if processed == 0 or not votes:
-        print(f"[RECOGNIZE] No faces detected. Processed: {processed}, Votes: {len(votes)}")
         return jsonify(ok=True, found=False, msg="Tidak ada wajah terdeteksi.")
 
     all_preds = [(nk, c) for nk, lst in votes.items() for c in lst]
     major = Counter([nk for nk, _ in all_preds]).most_common(1)[0][0]
     confs_for_major = votes.get(major, [])
+    
     if not confs_for_major:
-        print(f"[RECOGNIZE] No confidences for major NIK: {major}")
         return jsonify(ok=True, found=False, msg="Tidak dikenali.")
 
     vote_share = len(confs_for_major) / processed
     median_conf = float(np.median(confs_for_major))
-    
-    print(f"[RECOGNIZE] NIK: {major}, Votes: {len(confs_for_major)}/{processed} ({vote_share:.2%}), Median Conf: {median_conf:.2f}")
 
     if vote_share < VOTE_MIN_SHARE or len(confs_for_major) < MIN_VALID_FRAMES or median_conf >= LBPH_CONF_THRESHOLD:
-        print(f"[RECOGNIZE] Rejected - vote_share: {vote_share:.2%} (min: {VOTE_MIN_SHARE:.2%}), valid_frames: {len(confs_for_major)} (min: {MIN_VALID_FRAMES}), conf: {median_conf:.2f} (max: {LBPH_CONF_THRESHOLD})")
         return jsonify(ok=True, found=False, msg="Tidak dikenali.")
 
     with db_connect() as conn:
@@ -593,10 +736,13 @@ def api_recognize():
 
     confidence_percent = int(max(0, min(100, 100 - median_conf)))
     age = calculate_age(row["dob"])
+    
+    logger.info(f"[RECOGNIZE] LBPH success: NIK={major}, conf={median_conf:.2f}")
     return jsonify(
         ok=True, found=True,
         nik=row["nik"], name=row["name"], dob=row["dob"], address=row["address"],
-        age=age, confidence=confidence_percent
+        age=age, confidence=confidence_percent,
+        engine="lbph"
     )
 
 # ====== API: QUEUE (untuk sinkron Admin <-> User, tidak diubah) ======
@@ -645,17 +791,28 @@ def admin_retrain():
 @app.post("/admin/patient/<int:nik>/delete")
 @login_required
 def admin_delete_patient(nik: int):
+    """Delete patient and their face data"""
     with db_connect() as conn:
         conn.execute("DELETE FROM patients WHERE nik = ?", (nik,))
         conn.commit()
+    
     removed = 0
-    # Format nama file baru: nik.index.jpg
+    # Delete image files (LBPH format)
     for path in glob.glob(os.path.join(DATA_DIR, f"{nik}.*.jpg")):
         try:
             os.remove(path)
             removed += 1
         except Exception as e:
-            print("Gagal hapus file:", path, e)
+            logger.warning(f"Failed to delete file {path}: {e}")
+    
+    # Delete embeddings (InsightFace format)
+    if FACE_ENGINE == "insightface":
+        try:
+            deleted_emb = face_engine.delete_embeddings_for_nik(nik)
+            logger.info(f"Deleted {deleted_emb} embeddings for NIK {nik}")
+        except Exception as e:
+            logger.warning(f"Failed to delete embeddings: {e}")
+    
     ok, msg = retrain_after_change()
     flash(f"Hapus NIK {nik}: {removed} file dihapus. {msg}", "success" if ok else "danger")
     return redirect(url_for("admin_dashboard"))
@@ -663,10 +820,10 @@ def admin_delete_patient(nik: int):
 @app.post("/admin/patient/update")
 @login_required
 def admin_update_patient():
+    """Update patient information"""
     try:
         old_nik_str = request.form.get("old_nik", "").strip()
         nik_str = request.form.get("nik", "").strip()
-        # Nama TIDAK BISA diedit (sesuai request user)
         dob = request.form.get("dob", "").strip()
         address = request.form.get("address", "").strip()
 
@@ -677,34 +834,38 @@ def admin_update_patient():
         nik = int(nik_str)
 
         with db_connect() as conn:
-            # Cek jika NIK baru sudah dipakai oleh orang lain
             if nik != old_nik and conn.execute("SELECT 1 FROM patients WHERE nik = ?", (nik,)).fetchone():
                 return jsonify(ok=False, msg=f"NIK {nik} sudah terdaftar untuk pasien lain."), 409
 
-            # Update only NIK, DOB, and Address (NAME is NOT changed)
             conn.execute("""
                 UPDATE patients SET nik=?, dob=?, address=? WHERE nik=?
             """, (nik, dob, address, old_nik))
             conn.commit()
 
-        # If NIK changed, rename all image files AND RETRAIN model
         if nik != old_nik:
             renamed_count = 0
+            # Update image files (LBPH)
             pattern = os.path.join(DATA_DIR, f"{old_nik}.*.jpg")
             for old_path in glob.glob(pattern):
                 fname = os.path.basename(old_path)
                 parts = fname.split('.')
                 if len(parts) >= 3:
-                    # Format baru: old_nik.index.jpg -> new_nik.index.jpg
                     new_fname = f"{nik}.{'.'.join(parts[1:])}"
                     new_path = os.path.join(DATA_DIR, new_fname)
                     try:
                         os.rename(old_path, new_path)
                         renamed_count += 1
                     except Exception as e:
-                        print(f"Gagal rename {old_path} ke {new_path}: {e}")
+                        logger.warning(f"Failed to rename {old_path}: {e}")
             
-            # RETRAIN model karena NIK (label) berubah
+            # Update embeddings (InsightFace)
+            if FACE_ENGINE == "insightface":
+                try:
+                    updated_emb = face_engine.update_nik_in_embeddings(old_nik, nik)
+                    logger.info(f"Updated {updated_emb} embeddings from NIK {old_nik} to {nik}")
+                except Exception as e:
+                    logger.warning(f"Failed to update embeddings: {e}")
+            
             ok_retrain, msg_retrain = retrain_after_change()
             msg_rename = f"{renamed_count} file gambar di-rename. {msg_retrain}"
             if not ok_retrain:

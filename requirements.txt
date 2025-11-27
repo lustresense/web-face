@@ -2,3 +2,6 @@ Flask>=2.3
 opencv-contrib-python
 Pillow
 numpy
+scikit-learn
+onnxruntime
+insightface>=0.7.0

@@ -1,6 +1,14 @@
 # Exclude data folder
 data/
 
+# Model files (generated at runtime)
+model/buffalo_l/
+model/embeddings.db
+model/Trainer.yml
+model/labels.pkl
+model/last_dataset.sig
+model/*.npy
+
 # Python
 __pycache__/
 *.pyc
@@ -47,3 +55,6 @@ Thumbs.db
 
 # Temporary files
 temp_scan.jpg
+
+# Database
+database.db
