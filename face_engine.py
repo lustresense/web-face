@@ -98,6 +98,17 @@ def _euclidean_distance(emb1: np.ndarray, emb2: np.ndarray) -> float:
     return float(np.linalg.norm(emb1 - emb2))
 
 
+# Public utility functions for testing and external use
+def normalize_embedding(embedding: np.ndarray) -> np.ndarray:
+    """L2 normalize embedding vector (public API)"""
+    return _normalize_embedding(embedding)
+
+
+def cosine_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
+    """Calculate cosine similarity between two embeddings (public API)"""
+    return _cosine_similarity(emb1, emb2)
+
+
 # ====== EMBEDDING DATABASE ======
 
 def init_embedding_db():
@@ -750,8 +761,11 @@ def initialize():
 
 
 def is_available() -> bool:
-    """Check if face engine is available"""
-    return _get_face_app() is not None or True  # Fallback always available
+    """Check if face engine is available (InsightFace or fallback)"""
+    insightface_ready = _get_face_app() is not None
+    # Fallback is always available (uses Haar Cascade)
+    fallback_ready = True
+    return insightface_ready or fallback_ready
 
 
 def get_engine_status() -> Dict[str, Any]:

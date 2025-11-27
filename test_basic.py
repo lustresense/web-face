@@ -154,9 +154,9 @@ def test_embedding_functions():
         import face_engine
         import numpy as np
         
-        # Test embedding normalization
+        # Test embedding normalization (using public API)
         test_emb = np.random.randn(512).astype(np.float32)
-        normalized = face_engine._normalize_embedding(test_emb)
+        normalized = face_engine.normalize_embedding(test_emb)
         norm = np.linalg.norm(normalized)
         
         if abs(norm - 1.0) < 0.001:
@@ -165,8 +165,8 @@ def test_embedding_functions():
             print(f"  ✗ L2 normalization failed (norm: {norm:.4f})")
             return False
         
-        # Test cosine similarity
-        sim = face_engine._cosine_similarity(normalized, normalized)
+        # Test cosine similarity (using public API)
+        sim = face_engine.cosine_similarity(normalized, normalized)
         if abs(sim - 1.0) < 0.001:
             print(f"  ✓ Cosine similarity works (self-sim: {sim:.4f})")
         else:
