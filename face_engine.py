@@ -749,14 +749,21 @@ def suggest_threshold() -> float:
 
 # ====== INITIALIZATION ======
 
+_initialized = False
+
 def initialize():
     """Initialize face engine at startup"""
+    global _initialized
+    if _initialized:
+        return  # Already initialized
+    
     init_embedding_db()
     load_all_embeddings()
     
     # Pre-warm face detection (optional, may take time)
     # _get_face_app()
     
+    _initialized = True
     logger.info("Face engine initialized")
 
 

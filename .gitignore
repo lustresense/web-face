@@ -3,6 +3,7 @@ data/
 
 # Model files (generated at runtime)
 model/buffalo_l/
+model/models/
 model/embeddings.db
 model/Trainer.yml
 model/labels.pkl

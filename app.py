@@ -46,7 +46,7 @@ FACE_ENGINE = None
 try:
     if USE_INSIGHTFACE:
         import face_engine
-        face_engine.initialize()
+        # face_engine.initialize() is called automatically on import
         FACE_ENGINE = "insightface"
         logger.info("Using InsightFace engine for face recognition")
 except ImportError as e:
@@ -306,7 +306,7 @@ def get_images_and_labels():
             img_np = np.array(pil, "uint8")
             parts = fname.split(".")  # Format baru: nik.index.jpg
             if len(parts) < 3:  # Minimal: nik.index.jpg
-                print(f"Skip file dengan format salah: {fname}")
+                logger.debug(f"Skip file dengan format salah: {fname}")
                 continue
             
             # Ambil NIK dari parts[0] (format baru)
@@ -317,31 +317,25 @@ def get_images_and_labels():
             ids.append(nik)
             nik_counts[nik] = nik_counts.get(nik, 0) + 1
         except Exception as e:
-            print("Skip:", fpath, e)
+            logger.debug(f"Skip: {fpath} - {e}")
     
     if faces:
-        print(f"[TRAINING] Loaded {len(faces)} images for {len(nik_counts)} unique NIKs from {DATA_DIR}")
-        # Print first 10 NIKs to avoid excessive console output
-        for i, (nik, count) in enumerate(sorted(nik_counts.items())):
-            if i < 10:
-                print(f"  - NIK {nik}: {count} images")
-            elif i == 10:
-                print(f"  - ... and {len(nik_counts) - 10} more NIKs")
+        logger.info(f"[TRAINING] Loaded {len(faces)} images for {len(nik_counts)} unique NIKs")
     return faces, ids
 
 def train_model_blocking():
     faces, ids = get_images_and_labels()
     if not faces:
-        print("[TRAINING] No training data found!")
+        logger.info("[TRAINING] No training data found")
         return False, "Tidak ada data untuk training!"
     try:
-        print(f"[TRAINING] Starting training with {len(faces)} images...")
+        logger.info(f"[TRAINING] Starting training with {len(faces)} images...")
         recognizer.train(faces, np.array(ids))
         recognizer.save(MODEL_PATH)
-        print(f"[TRAINING] Model saved to {MODEL_PATH}")
+        logger.info(f"[TRAINING] Model saved to {MODEL_PATH}")
         return True, "Training selesai."
     except Exception as e:
-        print(f"[TRAINING] Error: {e}")
+        logger.error(f"[TRAINING] Error: {e}")
         return False, f"Error training: {e}"
 
 def load_model_if_exists():
@@ -350,13 +344,15 @@ def load_model_if_exists():
         try:
             recognizer.read(MODEL_PATH)
             model_loaded = True
-            print(f"[MODEL] Successfully loaded model from {MODEL_PATH}")
+            logger.info(f"[MODEL] Successfully loaded model from {MODEL_PATH}")
             return True
         except Exception as e:
-            print(f"[MODEL] Failed to load model: {e}")
+            logger.warning(f"[MODEL] Failed to load model: {e}")
             model_loaded = False
             return False
-    print(f"[MODEL] No model file found at {MODEL_PATH}")
+    # Only log "not found" if we're actually using LBPH as the primary engine
+    if FACE_ENGINE == "lbph":
+        logger.info(f"[MODEL] No model file found at {MODEL_PATH}")
     return False
 
 def retrain_after_change():
@@ -368,7 +364,7 @@ def retrain_after_change():
                 try:
                     os.remove(MODEL_PATH)
                 except Exception as e:
-                    print("Gagal hapus model:", e)
+                    logger.warning(f"Gagal hapus model: {e}")
             model_loaded = False
             return True, "Semua data dihapus. Model direset."
         ok, msg = train_model_blocking()
@@ -878,7 +874,7 @@ def admin_update_patient():
     except ValueError:
         return jsonify(ok=False, msg="NIK harus berupa angka."), 400
     except Exception as e:
-        print(f"Error update patient: {e}")
+        logger.error(f"Error update patient: {e}")
         return jsonify(ok=False, msg=f"Terjadi error di server: {e}"), 500
 
 if __name__ == "__main__":
